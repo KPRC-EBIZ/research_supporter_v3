@@ -1,10 +1,11 @@
 import { Camera, CheckCircle2, ChevronDown, ChevronUp, Download, Menu, MoreVertical, Phone, SlidersHorizontal, Search, Upload, X } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
+import type { ChangeEvent } from "react";
 import { clearAllData, deletePhoto, getBarcodeIndex, getItems, getPhotos, getPhotosByRegion, getPhotosByStore, getRegions, getSettings, getStores, importAllData, importRegionData, now, putItem, putPhoto, putStore, saveBarcodeIndex, saveParsedData, saveSettings, today, uid } from "./db";
 import { extractBarcodeImages } from "./barcodeImages";
 import { parseContactRows, parseSurveyWorkbook, mergeContacts, rebuildStoresAndRegions } from "./excel";
 import { dataUrlToBlob, exportBackup, exportRegionExcel, exportRegionZip } from "./exporters";
-import { downloadBlob, mapSearchAddress, requiredPhotoLabels, summarize } from "./logic";
+import { mapSearchAddress, requiredPhotoLabels, summarize } from "./logic";
 import type { AppSettings, BackupPayload, PhotoType, Region, RegionStats, StoreOperatingStatus, SurveyItem, SurveyPhoto, SurveyStore } from "./types";
 
 type View = "upload" | "regions" | "assignment" | "workspace" | "store" | "items" | "item" | "backup" | "validation";
@@ -49,6 +50,13 @@ const searchIncludes = (text: string, query: string) => {
   return source.includes(needle) || toChosung(source).includes(needle);
 };
 const nextRecentRegions = (current: string[] | undefined, region: string) => [region, ...(current ?? []).filter((name) => name !== region)].slice(0, 3);
+const itemNoOrder = (itemNo: string) => {
+  const parsed = Number(itemNo.replace(/\D/g, ""));
+  return Number.isFinite(parsed) ? parsed : Number.MAX_SAFE_INTEGER;
+};
+const compareSurveyItemOrder = (a: SurveyItem, b: SurveyItem) =>
+  (a.sourceOrder ?? itemNoOrder(a.itemNo)) - (b.sourceOrder ?? itemNoOrder(b.itemNo))
+  || a.itemNo.localeCompare(b.itemNo, "ko", { numeric: true });
 
 const emptyStats: RegionStats = { total: 0, completed: 0, inProgress: 0, notStarted: 0, photoMissing: 0 };
 const num = (value: string) => {
@@ -121,9 +129,16 @@ const photoExt = (fileOrPhoto: File | SurveyPhoto) => {
   if (type.includes("heif")) return "heif";
   return "jpg";
 };
-async function downloadPhotoBlob(blob: Blob, baseName: string, ext = "jpg") {
+function downloadPhotoBlob(blob: Blob, baseName: string, ext = "jpg") {
   const stamp = new Date().toISOString().replace(/[-:T]/g, "").slice(0, 14);
-  await downloadBlob(blob, `${sanitizeFileName(baseName)}_${stamp}.${ext}`);
+  const href = URL.createObjectURL(blob);
+  const anchor = document.createElement("a");
+  anchor.href = href;
+  anchor.download = `${sanitizeFileName(baseName)}_${stamp}.${ext}`;
+  document.body.appendChild(anchor);
+  anchor.click();
+  anchor.remove();
+  window.setTimeout(() => URL.revokeObjectURL(href), 1000);
 }
 const appendMemoText = (memo: string, text: string) => {
   const parts = memo.split("/").map((part) => part.trim()).filter(Boolean);
@@ -419,9 +434,12 @@ async function geocodeAddress(address: string): Promise<GeocodeResult | null> {
 
 async function resizePhoto(file: File) {
   if (!file.type.startsWith("image/")) return { blob: file, mimeType: file.type || "application/octet-stream", originalSize: file.size, resizedSize: file.size };
-  const bitmap = await createImageBitmap(file);
+  const bitmap = await loadImageBitmap(file);
   try {
-    const sourceEdge = Math.max(bitmap.width, bitmap.height);
+    const sourceWidth = "naturalWidth" in bitmap ? bitmap.naturalWidth : bitmap.width;
+    const sourceHeight = "naturalHeight" in bitmap ? bitmap.naturalHeight : bitmap.height;
+    const sourceEdge = Math.max(sourceWidth, sourceHeight);
+    if (!sourceWidth || !sourceHeight) return { blob: file, mimeType: file.type || "image/jpeg", originalSize: file.size, resizedSize: file.size };
     const edgeSteps = [PHOTO_MAX_EDGE, 1150, 1024, 900, PHOTO_MIN_EDGE].filter((edge, index, array) => edge <= sourceEdge && array.indexOf(edge) === index);
     if (!edgeSteps.length) edgeSteps.push(sourceEdge);
     const canvas = document.createElement("canvas");
@@ -430,8 +448,8 @@ async function resizePhoto(file: File) {
     let best: Blob | null = null;
     for (const maxEdge of edgeSteps) {
       const scale = Math.min(1, maxEdge / sourceEdge);
-      const width = Math.max(1, Math.round(bitmap.width * scale));
-      const height = Math.max(1, Math.round(bitmap.height * scale));
+      const width = Math.max(1, Math.round(sourceWidth * scale));
+      const height = Math.max(1, Math.round(sourceHeight * scale));
       canvas.width = width;
       canvas.height = height;
       context.clearRect(0, 0, width, height);
@@ -446,8 +464,35 @@ async function resizePhoto(file: File) {
     const output = best && best.size < file.size ? best : file;
     return { blob: output, mimeType: output.type || file.type || "image/jpeg", originalSize: file.size, resizedSize: output.size };
   } finally {
-    bitmap.close();
+    if ("close" in bitmap) bitmap.close();
   }
+}
+
+async function loadImageBitmap(file: File) {
+  if ("createImageBitmap" in window) {
+    try {
+      return await createImageBitmap(file);
+    } catch (error) {
+      console.warn("createImageBitmap failed, retrying with image element", error);
+    }
+  }
+  return imageElementToBitmap(file);
+}
+
+async function imageElementToBitmap(file: File): Promise<HTMLImageElement> {
+  const url = URL.createObjectURL(file);
+  return new Promise<HTMLImageElement>((resolve, reject) => {
+      const img = new Image();
+      img.onload = () => {
+        URL.revokeObjectURL(url);
+        resolve(img);
+      };
+      img.onerror = () => {
+        URL.revokeObjectURL(url);
+        reject(new Error("이미지를 불러오지 못했습니다."));
+      };
+      img.src = url;
+    });
 }
 
 function App() {
@@ -461,6 +506,7 @@ function App() {
   const [photos, setPhotos] = useState<SurveyPhoto[]>([]);
   const [selectedStoreId, setSelectedStoreId] = useState("");
   const [selectedItemId, setSelectedItemId] = useState("");
+  const [itemNavigationIds, setItemNavigationIds] = useState<string[]>([]);
   const [mapFocusStoreId, setMapFocusStoreId] = useState("");
   const [regionQuery, setRegionQuery] = useState("");
   const [storeQuery, setStoreQuery] = useState("");
@@ -585,7 +631,7 @@ function App() {
     .filter((photo) => photo.type === "STORE_FRONT" && photo.id !== selectedStore?.frontPhotoId)
     .sort((a, b) => `${b.takenAt}`.localeCompare(`${a.takenAt}`)), [photos, selectedStore?.frontPhotoId]);
   const visibleStoreItems = useMemo(() => [...storeItems]
-    .sort((a, b) => itemSort === "물품코드 순" ? a.itemNo.localeCompare(b.itemNo, "ko", { numeric: true }) : 0)
+    .sort((a, b) => itemSort === "물품코드 순" ? a.itemNo.localeCompare(b.itemNo, "ko", { numeric: true }) : compareSurveyItemOrder(a, b))
     .filter((item) => searchIncludes(`${item.itemNo} ${item.productName} ${item.barcode} ${item.companyManager} ${item.companyName} ${item.companyTel} ${item.martTel}`, itemQuery))
     .filter((item) => {
       if (filter === "전체") return true;
@@ -597,6 +643,10 @@ function App() {
     }), [storeItems, itemQuery, filter, photos, itemSort]);
   const barcodeModalItem = items.find((item) => item.id === barcodeModalItemId);
   const barcodeModalItems = visibleStoreItems.length ? visibleStoreItems : storeItems;
+  const itemNavigationItems = useMemo(() => {
+    const itemById = new Map(items.map((item) => [item.id, item]));
+    return itemNavigationIds.map((id) => itemById.get(id)).filter((item): item is SurveyItem => Boolean(item));
+  }, [items, itemNavigationIds]);
   useEffect(() => {
     setStoreStatusDraft(selectedStore?.operatingStatus ?? "");
     setStoreStatusMessage("");
@@ -1033,13 +1083,18 @@ function App() {
 
   async function saveStorePhoto(file: File) {
     if (!selectedStore) return;
-    if (selectedStore.frontPhotoId) await deletePhoto(selectedStore.frontPhotoId);
-    const resized = await resizePhoto(file);
-    const photo: SurveyPhoto = { id: uid("photo"), region: selectedStore.region, storeId: selectedStore.id, type: "STORE_FRONT", blob: resized.blob, originalName: file.name, mimeType: resized.mimeType, takenAt: now() };
-    const nextStore = { ...selectedStore, frontPhotoId: photo.id, operatingStatus: selectedStore.operatingStatus, status: "진행중" as const, startedAt: selectedStore.startedAt ?? now(), updatedAt: now() };
-    await putPhoto(photo);
-    await putStore(nextStore);
-    await refresh(selectedStore.region);
+    try {
+      if (selectedStore.frontPhotoId) await deletePhoto(selectedStore.frontPhotoId);
+      const resized = await resizePhoto(file);
+      const photo: SurveyPhoto = { id: uid("photo"), region: selectedStore.region, storeId: selectedStore.id, type: "STORE_FRONT", blob: resized.blob, originalName: file.name, mimeType: resized.mimeType, takenAt: now() };
+      const nextStore = { ...selectedStore, frontPhotoId: photo.id, operatingStatus: selectedStore.operatingStatus, status: "진행중" as const, startedAt: selectedStore.startedAt ?? now(), updatedAt: now() };
+      await putPhoto(photo);
+      await putStore(nextStore);
+      await refresh(selectedStore.region);
+    } catch (error) {
+      console.error(error);
+      alert("사진을 처리하지 못했습니다. 다른 사진을 선택하거나 카메라 설정을 확인해 주세요.");
+    }
   }
 
   async function useExistingStorePhoto(source: SurveyPhoto) {
@@ -1110,6 +1165,7 @@ function App() {
 
   function openItemFromBarcodeModal(itemId: string) {
     setBarcodeReturnItemId(itemId);
+    setItemNavigationIds(barcodeModalItems.map((item) => item.id));
     setSelectedItemId(itemId);
     setBarcodeModalItemId("");
     setView("item");
@@ -1737,7 +1793,10 @@ function App() {
             </section>
             <section className="panel store-survey-panel">
               <h2>조사 입력</h2>
-              <p>조사 품목: {storeItems.length.toLocaleString()}건</p>
+              <div className="store-operating store-survey-count">
+                <span>조사 품목</span>
+                <strong>{storeItems.length.toLocaleString()}건</strong>
+              </div>
               <label className="store-date-row"><input type="date" value={selectedStore.surveyDate} onChange={async (event) => { await putStore({ ...selectedStore, surveyDate: event.target.value, updatedAt: now() }); await refresh(selectedStore.region); }} /></label>
               <button className="primary sticky-lite" onClick={() => selectedStore.operatingStatus ? (setItemQuery(""), setItemsReturnView("store"), setView("items")) : alert("매장 상태를 먼저 설정해 주세요.")}>조사 입력</button>
             </section>
@@ -1784,8 +1843,8 @@ function App() {
                     </dl>
                   </div>
                   <div className="item-card-actions">
-                    <button type="button" onClick={() => setBarcodeModalItemId(item.id)}>바코드</button>
-                    <button className="primary" onClick={() => { setBarcodeReturnItemId(""); setSelectedItemId(item.id); setView("item"); }}>입력</button>
+                    <button type="button" onClick={() => { setItemNavigationIds(visibleStoreItems.map((candidate) => candidate.id)); setBarcodeModalItemId(item.id); }}>바코드</button>
+                    <button className="primary" onClick={() => { setBarcodeReturnItemId(""); setItemNavigationIds(visibleStoreItems.map((candidate) => candidate.id)); setSelectedItemId(item.id); setView("item"); }}>입력</button>
                   </div>
                 </article>
               );
@@ -1795,7 +1854,7 @@ function App() {
       )}
 
       {view === "item" && selectedItem && (
-        <ItemEditor item={selectedItem} storeItems={storeItems} storeOperatingStatus={stores.find((store) => store.id === selectedItem.storeId)?.operatingStatus ?? ""} photos={photos.filter((photo) => photo.storeId === selectedItem.storeId)} fromBarcodeFlow={barcodeReturnItemId === selectedItem.id} onSave={saveItem} onSaved={async () => { await refresh(selectedItem.region); }} onList={(focusId) => { if (focusId) setSelectedItemId(focusId); setView("items"); }} onStoreList={() => { setFilter("전체"); setSelectedStoreId(selectedItem.storeId); setView("workspace"); }} onMove={(id) => setSelectedItemId(id)} onBarcodeReturn={returnToBarcodeModal} askConfirm={askConfirm} />
+        <ItemEditor item={selectedItem} storeItems={storeItems} navigationItems={itemNavigationItems.length ? itemNavigationItems : (visibleStoreItems.length ? visibleStoreItems : storeItems)} storeOperatingStatus={stores.find((store) => store.id === selectedItem.storeId)?.operatingStatus ?? ""} photos={photos.filter((photo) => photo.storeId === selectedItem.storeId)} fromBarcodeFlow={barcodeReturnItemId === selectedItem.id} onSave={saveItem} onSaved={async () => { await refresh(selectedItem.region); }} onList={(focusId) => { if (focusId) setSelectedItemId(focusId); setView("items"); }} onStoreList={() => { setFilter("전체"); setSelectedStoreId(selectedItem.storeId); setView("workspace"); }} onMove={(id) => setSelectedItemId(id)} onBarcodeReturn={returnToBarcodeModal} askConfirm={askConfirm} />
       )}
 
       {view === "validation" && (
@@ -2581,20 +2640,26 @@ function ItemContact({ item }: { item: SurveyItem }) {
 }
 
 function PhotoInput({ id, label, cameraLabel = "촬영", pickLabel = "선택", onFile }: { id?: string; label: string; cameraLabel?: string; pickLabel?: string; onFile: (file: File) => void | Promise<void> }) {
-  const pickId = `${id ?? uid("photo_pick")}-pick`;
-  const cameraId = `${id ?? uid("photo_camera")}-camera`;
+  const stableId = useRef(id ?? uid("photo_input"));
+  const pickId = `${stableId.current}-pick`;
+  const cameraId = `${stableId.current}-camera`;
+  const handleFile = async (event: ChangeEvent<HTMLInputElement>) => {
+    const file = event.currentTarget.files?.[0];
+    event.currentTarget.value = "";
+    if (file) await onFile(file);
+  };
   return (
     <div className="photo-picker">
       {label && <span>{label}</span>}
       <div>
-        <label className="photo-button" htmlFor={cameraId}><Camera size={18} />{cameraLabel}<input id={cameraId} type="file" accept="image/*" capture="environment" onChange={(event) => event.target.files?.[0] && onFile(event.target.files[0])} /></label>
-        <label className="photo-button" htmlFor={pickId}><Upload size={18} />{pickLabel}<input id={pickId} type="file" accept="image/jpeg,image/png,image/webp,image/heic,image/heif" onChange={(event) => event.target.files?.[0] && onFile(event.target.files[0])} /></label>
+        <label className="photo-button" htmlFor={cameraId}><Camera size={18} />{cameraLabel}<input id={cameraId} type="file" accept="image/*" capture="environment" onChange={handleFile} /></label>
+        <label className="photo-button" htmlFor={pickId}><Upload size={18} />{pickLabel}<input id={pickId} type="file" accept="image/*" onChange={handleFile} /></label>
       </div>
     </div>
   );
 }
 
-function ItemEditor({ item, storeItems, storeOperatingStatus, photos, fromBarcodeFlow, onSave, onSaved, onList, onStoreList, onMove, onBarcodeReturn, askConfirm }: { item: SurveyItem; storeItems: SurveyItem[]; storeOperatingStatus: StoreOperatingStatus | ""; photos: SurveyPhoto[]; fromBarcodeFlow?: boolean; onSave: (item: SurveyItem, photoOverride?: SurveyPhoto[]) => Promise<boolean>; onSaved: () => Promise<void>; onList: (focusId?: string) => void; onStoreList: () => void; onMove: (id: string) => void; onBarcodeReturn?: (id: string) => void; askConfirm: (options: ConfirmState) => Promise<boolean> }) {
+function ItemEditor({ item, storeItems, navigationItems, storeOperatingStatus, photos, fromBarcodeFlow, onSave, onSaved, onList, onStoreList, onMove, onBarcodeReturn, askConfirm }: { item: SurveyItem; storeItems: SurveyItem[]; navigationItems: SurveyItem[]; storeOperatingStatus: StoreOperatingStatus | ""; photos: SurveyPhoto[]; fromBarcodeFlow?: boolean; onSave: (item: SurveyItem, photoOverride?: SurveyPhoto[]) => Promise<boolean>; onSaved: () => Promise<void>; onList: (focusId?: string) => void; onStoreList: () => void; onMove: (id: string) => void; onBarcodeReturn?: (id: string) => void; askConfirm: (options: ConfirmState) => Promise<boolean> }) {
   const [draft, setDraft] = useState(item);
   const [localPhotos, setLocalPhotos] = useState<SurveyPhoto[]>(photos);
   const [deletedPhotoIds, setDeletedPhotoIds] = useState<string[]>([]);
@@ -2656,7 +2721,14 @@ function ItemEditor({ item, storeItems, storeOperatingStatus, photos, fromBarcod
     }
   };
   const upload = async (type: PhotoType, file: File) => {
-    const resized = await resizePhoto(file);
+    let resized: Awaited<ReturnType<typeof resizePhoto>>;
+    try {
+      resized = await resizePhoto(file);
+    } catch (error) {
+      console.error(error);
+      setPhotoMessage("사진을 처리하지 못했습니다. 다른 사진을 선택하거나 카메라 설정을 확인해 주세요.");
+      return;
+    }
     const oldPhotos = localPhotos.filter((photo) => photo.itemId === draft.id && photo.type === type);
     setDeletedPhotoIds((old) => [...old, ...oldPhotos.filter((photo) => !photo.id.startsWith("temp_")).map((photo) => photo.id)]);
     const photo: SurveyPhoto = { id: uid("temp_photo"), region: draft.region, storeId: draft.storeId, itemId: draft.id, type, blob: resized.blob, originalName: file.name, mimeType: resized.mimeType, takenAt: now() };
@@ -2699,14 +2771,15 @@ function ItemEditor({ item, storeItems, storeOperatingStatus, photos, fromBarcod
       setPhotoMessage("바코드 자동인식에 실패했습니다.");
     }
   };
+  const navItems = navigationItems.some((candidate) => candidate.id === draft.id) ? navigationItems : storeItems;
   const nextTodoId = () => {
-    const currentIndex = storeItems.findIndex((candidate) => candidate.id === draft.id);
-    const ordered = [...storeItems.slice(currentIndex + 1), ...storeItems.slice(0, Math.max(0, currentIndex))];
+    const currentIndex = navItems.findIndex((candidate) => candidate.id === draft.id);
+    const ordered = [...navItems.slice(currentIndex + 1), ...navItems.slice(0, Math.max(0, currentIndex))];
     return ordered.find((candidate) => candidate.id !== draft.id && candidate.status !== "완료")?.id;
   };
   const nextSequentialId = () => {
-    const currentIndex = storeItems.findIndex((candidate) => candidate.id === draft.id);
-    return storeItems[currentIndex + 1]?.id;
+    const currentIndex = navItems.findIndex((candidate) => candidate.id === draft.id);
+    return navItems[currentIndex + 1]?.id;
   };
   const appendMemo = (text: string) => {
     const parts = draft.memo.split("/").map((part) => part.trim()).filter(Boolean);
