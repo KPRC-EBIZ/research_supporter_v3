@@ -888,6 +888,7 @@ textarea { min-height: 110px; resize: vertical; }
   background: #fffbeb;
 }
 .photo-button {
+  position: relative;
   min-height: 54px;
   border: 2px dashed #94a3b8;
   border-radius: 8px;
@@ -897,8 +898,16 @@ textarea { min-height: 110px; resize: vertical; }
   gap: 8px;
   background: #f8fafc;
   cursor: pointer;
+  overflow: hidden;
 }
-.photo-button input { display: none; }
+.photo-button input {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  opacity: 0;
+  cursor: pointer;
+}
 .photo-rule,
 .small-help {
   font-size: 13px;
@@ -1154,10 +1163,9 @@ textarea { min-height: 110px; resize: vertical; }
 }
 .store-state-actions {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
+  grid-template-columns: minmax(0, 1fr);
   gap: 8px;
   margin: 12px 0 0;
-  align-items: center;
 }
 .store-state-actions select {
   width: 100%;
@@ -1165,8 +1173,10 @@ textarea { min-height: 110px; resize: vertical; }
   min-height: 44px;
 }
 .store-state-actions button {
+  width: 100%;
   min-width: 0;
   min-height: 44px;
+  height: 44px;
   padding-inline: 14px;
 }
 .store-status-message {
@@ -1252,7 +1262,7 @@ textarea { min-height: 110px; resize: vertical; }
 }
 .store-date-row {
   display: block;
-  margin-bottom: 14px;
+  margin: 12px 0 8px;
 }
 .store-date-row span {
   color: #64748b;
@@ -1263,6 +1273,8 @@ textarea { min-height: 110px; resize: vertical; }
 .store-date-row input {
   width: 100%;
   min-width: 0;
+  min-height: 44px;
+  height: 44px;
   font-size: 13px;
   padding-left: 10px;
   padding-right: 10px;
@@ -1279,6 +1291,15 @@ textarea { min-height: 110px; resize: vertical; }
 .store-survey-panel {
   display: grid;
   align-content: start;
+}
+.store-survey-count strong {
+  color: #0f172a;
+  font-size: 14px;
+  font-weight: 900;
+}
+.store-survey-panel .sticky-lite {
+  min-height: 44px;
+  height: 44px;
 }
 .meta-label {
   color: #64748b;
